@@ -41,11 +41,6 @@ novel repo
 https://m2k3a.github.io/mangayomi-extensions/novel_index.json
 ```
 
-# Contributing
-
-Contributions are welcome!
-
-To get started with development, see [CONTRIBUTING-DART.md](./CONTRIBUTING-DART.md) for create sources in Dart or [CONTRIBUTING-JS.md](./CONTRIBUTING-JS.md) for create sources in JavaScript.
 
 ## License
 
