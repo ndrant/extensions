@@ -185,242 +185,114 @@ class ZoroTheme extends MProvider {
 
   @override
   Future<List<MVideo>> getVideoList(String url) async {
-    final id = substringAfterLast(url, '?ep=');
-
-    final res = (await client.get(
-      Uri.parse(
-        "${source.baseUrl}/ajax${ajaxRoute('${source.baseUrl}')}/episode/servers?episodeId=$id",
-      ),
-      headers: {"referer": "${source.baseUrl}/$url"},
-    )).body;
-    final html = json.decode(res)["html"];
-
-    final serverElements = parseHtml(html).select("div.server-item");
-
+    final id = substringAfterLast(url, '/watch/');
     List<MVideo> videos = [];
     final hosterSelection = preferenceHosterSelection(source.id);
     final typeSelection = preferenceTypeSelection(source.id);
-    for (var serverElement in serverElements) {
-      final name = serverElement.text;
-      final id = serverElement.attr("data-id");
-      final subDub = serverElement.attr("data-type");
-
-      final resE = (await client.get(
-        Uri.parse(
-          "${source.baseUrl}/ajax${ajaxRoute('${source.baseUrl}')}/episode/sources?id=$id",
-        ),
-        headers: {"referer": "${source.baseUrl}/$url"},
-      )).body;
-      String epUrl = substringBefore(substringAfter(resE, "\"link\":\""), "\"");
-      List<MVideo> a = [];
-      if (hosterSelection.contains(name) && typeSelection.contains(subDub)) {
-        if (name.contains("Vidstreaming")) {
-          a = await rapidCloudExtractor(epUrl, "Vidstreaming - $subDub", id);
-        } else if (name.contains("Vidcloud")) {
-          a = await rapidCloudExtractor(epUrl, "Vidcloud - $subDub", id);
-        } else if (name.contains("StreamTape")) {
-          a = await streamTapeExtractor(epUrl, "StreamTape - $subDub");
-        } else if ([
-          "HD-1",
-          "HD-2",
-          "HD-3",
-        ].any((element) => name.contains(element))) {
-          a = await rapidCloudExtractor(epUrl, "$name - $subDub", id);
+    for (var nameStr in hosterSelection) {
+      try {
+        if (typeSelection.contains("sub")) {
+          final videoRes = await getVideoServers(id, nameStr, "Sub");
+          videos.addAll(videoRes);
         }
+      } catch (e) {}
 
-        videos.addAll(a);
+      if (typeSelection.contains("dub")) {
+        final videoRes = await getVideoServers(id, nameStr, "Dub");
+        videos.addAll(videoRes);
       }
+
+      try {
+        if (typeSelection.contains("raw")) {
+          final videoRes = await getVideoServers(id, nameStr, "Raw");
+          videos.addAll(videoRes);
+        }
+      } catch (e) {}
     }
 
     return sortVideos(videos, source.id);
   }
 
-  Future<List<MVideo>> rapidCloudExtractor(
-    String url,
-    String name,
-    String dataID,
+  Future<List<Video>> getVideoServers(
+    String id,
+    String serverName,
+    String subDub,
   ) async {
-    try {
-      final headers = {'Referer': 'https://megacloud.club/'};
-      final serverUrl = ['https://megacloud.tv', 'https://rapid-cloud.co'];
+    final headers = {'Referer': 'https://megacloud.club/'};
+    List<Video> videos = [];
+    final name = "$serverName - $subDub";
 
-      final serverType = RegExp(r'https://megacloud\..*').hasMatch(url) ? 0 : 1;
-      final sourceUrl = [
-        '/embed-2/v2/e-1/getSources?id=',
-        '/ajax/embed-6-v2/getSources?id=',
-      ];
-      final sourceSpliter = ['/e-1/', '/embed-6-v2/'];
-      final id = url.split(sourceSpliter[serverType]).last.split('?').first;
-      final response = await client.get(
-        Uri.parse('${serverUrl[serverType]}${sourceUrl[serverType]}$id'),
-        headers: {"X-Requested-With": "XMLHttpRequest"},
-      );
-      if (response.statusCode != 200) {
-        return [];
-      }
-      final resServer = response.body;
+    final resStreamBody = (await client.get(
+      Uri.parse(
+        "https://animeapiiiii.vercel.app/api/stream?id=$id&server=${serverName.toLowerCase()}&type=${subDub.toLowerCase()}",
+      ),
+    )).body;
+    final resStream = json.decode(resStreamBody);
+    if ((resStream['results'] as Map).isEmpty) {
+      return videos;
+    }
+    final videoResJson = resStream['results']['streamingLink'];
+    if (videoResJson.isEmpty) {
+      return videos;
+    }
+    String masterUrl = videoResJson['link']['file'];
+    String type = videoResJson['link']['type'];
 
-      final encrypted = getMapValue(resServer, "encrypted");
-      List<Map<String, dynamic>> videoResJson = [];
-      List<MVideo> videos = [];
-      if (encrypted == "true") {
-        final key = await getWorkingKey(dataID);
-        if (key == null) {
-          return [];
+    final tracks = (videoResJson['tracks'] as List)
+        .where((e) => e['kind'] == 'captions' ? true : false)
+        .toList();
+    List<MTrack> subtitles = [];
+
+    for (var sub in tracks) {
+      try {
+        MTrack subtitle = MTrack();
+        subtitle
+          ..label = sub["label"]
+          ..file = sub["file"];
+        subtitles.add(subtitle);
+      } catch (_) {}
+    }
+
+    if (type == "hls") {
+      final masterPlaylistRes = (await client.get(
+        Uri.parse(masterUrl),
+        headers: headers,
+      )).body;
+
+      for (var it in substringAfter(
+        masterPlaylistRes,
+        "#EXT-X-STREAM-INF:",
+      ).split("#EXT-X-STREAM-INF:")) {
+        final quality =
+            "${substringBefore(substringBefore(substringAfter(substringAfter(it, "RESOLUTION="), "x"), ","), "\n")}p";
+
+        String videoUrl = substringBefore(substringAfter(it, "\n"), "\n");
+
+        if (!videoUrl.startsWith("http")) {
+          videoUrl =
+              "${masterUrl.split("/").sublist(0, masterUrl.split("/").length - 1).join("/")}/$videoUrl";
         }
-        final sources = await getSource(dataID, key);
-        if (sources == null || sources['sources'] == null) {
-          return [];
-        }
-        videoResJson = sources['sources'];
-      } else {
-        videoResJson = json.decode(resServer)["sources"];
-      }
 
-      String masterUrl = videoResJson[0]['file'];
-      String type = videoResJson[0]['type'];
-
-      final tracks = (json.decode(resServer)['tracks'] as List)
-          .where((e) => e['kind'] == 'captions' ? true : false)
-          .toList();
-      List<MTrack> subtitles = [];
-
-      for (var sub in tracks) {
-        try {
-          MTrack subtitle = MTrack();
-          subtitle
-            ..label = sub["label"]
-            ..file = sub["file"];
-          subtitles.add(subtitle);
-        } catch (_) {}
-      }
-
-      if (type == "hls") {
-        final masterPlaylistRes = (await client.get(
-          Uri.parse(masterUrl),
-          headers: headers,
-        )).body;
-
-        for (var it in substringAfter(
-          masterPlaylistRes,
-          "#EXT-X-STREAM-INF:",
-        ).split("#EXT-X-STREAM-INF:")) {
-          final quality =
-              "${substringBefore(substringBefore(substringAfter(substringAfter(it, "RESOLUTION="), "x"), ","), "\n")}p";
-
-          String videoUrl = substringBefore(substringAfter(it, "\n"), "\n");
-
-          if (!videoUrl.startsWith("http")) {
-            videoUrl =
-                "${masterUrl.split("/").sublist(0, masterUrl.split("/").length - 1).join("/")}/$videoUrl";
-          }
-
-          MVideo video = MVideo();
-          video
-            ..url = videoUrl
-            ..originalUrl = videoUrl
-            ..quality = "$name - $quality"
-            ..subtitles = subtitles
-            ..headers = headers;
-          videos.add(video);
-        }
-      } else {
         MVideo video = MVideo();
         video
-          ..url = masterUrl
-          ..originalUrl = masterUrl
-          ..quality = "$name - Default"
+          ..url = videoUrl
+          ..originalUrl = videoUrl
+          ..quality = "$name - $quality"
           ..subtitles = subtitles
           ..headers = headers;
         videos.add(video);
       }
-      return videos;
-    } catch (e) {
-      return [];
+    } else {
+      MVideo video = MVideo();
+      video
+        ..url = masterUrl
+        ..originalUrl = masterUrl
+        ..quality = "$name - Default"
+        ..subtitles = subtitles
+        ..headers = headers;
+      videos.add(video);
     }
-  }
-
-  // credits: https://github.com/50n50/sources/blob/main/hianime/hianime.js
-  Future<String?> getWorkingKey(String dataID) async {
-    try {
-      final res = await client.get(
-        Uri.parse(
-          'https://raw.githubusercontent.com/itzzzme/megacloud-keys/refs/heads/main/key.txt',
-        ),
-      );
-      final key = res.body.trim();
-      final sources = await getSource(dataID, key);
-
-      if (sources != null && sources['sources'] != null) return key;
-    } catch (e) {}
-
-    try {
-      final res = await client.get(
-        Uri.parse(
-          'https://justarion.github.io/keys/e1-player/src/data/keys.json',
-        ),
-      );
-      final jsonRes = json.decode(res.body);
-      final key = jsonRes['megacloud']['anime']['key'];
-      final sources = await getSource(dataID, key);
-      if (sources != null && sources['sources'] != null) return key;
-    } catch (e) {}
-
-    try {
-      final res = await client.get(
-        Uri.parse(
-          'https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json',
-        ),
-      );
-      final jsonRes = json.decode(res.body);
-      final key = jsonRes['mega'];
-      final sources = await getSource(dataID, key);
-      if (sources != null && sources['sources'] != null) return key;
-    } catch (e) {}
-
-    try {
-      final res = await client.get(
-        Uri.parse(
-          'https://raw.githubusercontent.com/SpencerDevs/megacloud-key-updater/refs/heads/master/key.txt',
-        ),
-      );
-      final key = res.body.trim();
-      final sources = await getSource(dataID, key);
-      if (sources != null && sources['sources'] != null) return key;
-    } catch (e) {}
-
-    return null;
-  }
-
-  // credits: https://github.com/50n50/sources/blob/main/hianime/hianime.js
-  Future<Map<String, dynamic>?> getSource(String sourceId, String key) async {
-    final res1 = await client.get(
-      Uri.parse("${source.baseUrl}/ajax/v2/episode/sources?id=$sourceId"),
-    );
-    final json1 = json.decode(res1.body);
-    final link = json1['link'] ?? "";
-    final idMatch = RegExp(r'/e-1/([^/?]+)').firstMatch(link);
-    final streamId = idMatch?.group(1);
-
-    if (streamId == null) return null;
-
-    final res2 = await client.get(
-      Uri.parse(
-        'https://megacloud.blog/embed-2/v2/e-1/getSources?id=$streamId',
-      ),
-    );
-    final json2 = json.decode(res2.body);
-    final encrypted = json2['sources'];
-
-    if (encrypted == null) return null;
-
-    final result = <String, dynamic>{};
-
-    final sources = json.decode(decryptAESCryptoJS(encrypted, key));
-    if (sources == null) return null;
-
-    result['sources'] = sources;
-    return result;
+    return videos;
   }
 
   MPages animeElementM(String res) {
@@ -608,8 +480,8 @@ class ZoroTheme extends MProvider {
           title: "Preferred server",
           summary: "",
           valueIndex: 0,
-          entries: ["HD-1", "HD-2", "HD-3", "StreamTape"],
-          entryValues: ["HD-1", "HD-2", "HD-3", "StreamTape"],
+          entries: ["HD-1", "HD-2", "HD-3"],
+          entryValues: ["HD-1", "HD-2", "HD-3"],
         ),
       if (source.name != "HiAnime")
         ListPreference(
@@ -617,8 +489,8 @@ class ZoroTheme extends MProvider {
           title: "Preferred server",
           summary: "",
           valueIndex: 0,
-          entries: ["Vidstreaming", "VidCloud", "StreamTape"],
-          entryValues: ["Vidstreaming", "VidCloud", "StreamTape"],
+          entries: ["Vidstreaming", "VidCloud"],
+          entryValues: ["Vidstreaming", "VidCloud"],
         ),
       ListPreference(
         key: "preferred_type1",
@@ -630,29 +502,29 @@ class ZoroTheme extends MProvider {
       ),
       if (source.name != "HiAnime")
         MultiSelectListPreference(
-          key: "hoster_selection2",
+          key: "hoster_selection3",
           title: "Enable/Disable Hosts",
           summary: "",
-          entries: ["Vidstreaming", "VidCloud", "StreamTape"],
-          entryValues: ["Vidstreaming", "VidCloud", "StreamTape"],
-          values: ["Vidstreaming", "VidCloud", "StreamTape"],
+          entries: ["Vidstreaming", "VidCloud"],
+          entryValues: ["Vidstreaming", "VidCloud"],
+          values: ["Vidstreaming", "VidCloud"],
         ),
       if (source.name == "HiAnime")
         MultiSelectListPreference(
-          key: "hoster_selection2",
+          key: "hoster_selection3",
           title: "Enable/Disable Hosts",
           summary: "",
-          entries: ["HD-1", "HD-2", "HD-3", "StreamTape"],
-          entryValues: ["HD-1", "HD-2", "HD-3", "StreamTape"],
-          values: ["HD-1", "HD-2", "HD-3", "StreamTape"],
+          entries: ["HD-1", "HD-2", "HD-3"],
+          entryValues: ["HD-1", "HD-2", "HD-3"],
+          values: ["HD-1", "HD-2"],
         ),
       MultiSelectListPreference(
-        key: "type_selection_1",
+        key: "type_selection_3",
         title: "Enable/Disable Types",
         summary: "",
         entries: ["Sub", "Dub", "Raw"],
         entryValues: ["sub", "dub", "raw"],
-        values: ["sub", "dub", "raw"],
+        values: ["sub", "dub"],
       ),
     ];
   }
@@ -690,11 +562,11 @@ class ZoroTheme extends MProvider {
   }
 
   List<String> preferenceHosterSelection(int sourceId) {
-    return getPreferenceValue(sourceId, "hoster_selection2");
+    return getPreferenceValue(sourceId, "hoster_selection3");
   }
 
   List<String> preferenceTypeSelection(int sourceId) {
-    return getPreferenceValue(sourceId, "type_selection_1");
+    return getPreferenceValue(sourceId, "type_selection_3");
   }
 
   String ll(String url) {
